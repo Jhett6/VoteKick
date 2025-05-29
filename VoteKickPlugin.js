@@ -1,8 +1,8 @@
 import DiscordBasePlugin from './discord-base-plugin.js';
 
-class VoteKickPlugin extends DiscordBasePlugin {
+export default class VoteKickPlugin extends DiscordBasePlugin {
   static get description() {
-    return 'Vote to kick a player with Discord alerts, exposed settings, and optional vote status command.';
+    return 'Allows players to initiate a vote to kick via in-game chat, logs progress to Discord. Must be reviewed by admin.';
   }
 
   static get defaultEnabled() {
@@ -11,121 +11,180 @@ class VoteKickPlugin extends DiscordBasePlugin {
 
   static get optionsSpecification() {
     return {
+      ...DiscordBasePlugin.optionsSpecification,
+      channelID: {
+        required: true,
+        description: 'The ID of the channel to log votekick updates.',
+        default: '',
+        example: '667741905228136459'
+      },
       voteDurationSec: {
         required: false,
         default: 120,
-        description: 'Duration of the vote in seconds.'
+        description: 'How long a vote lasts in seconds.'
       },
       requiredPercentage: {
         required: false,
         default: 60,
         description: 'Percentage of players required to pass the vote.'
       },
-      discordChannelID: {
-        required: true,
-        description: 'The Discord channel ID to send vote notifications to.'
-      },
-      enableVoteStatusCommand: {
+      ignoreChats: {
         required: false,
-        default: true,
-        description: 'Whether players can check vote status using !votes.'
+        default: ['ChatSquad'],
+        description: 'Chat types to ignore.'
       }
     };
   }
 
   constructor(server, options, connectors) {
     super(server, options, connectors);
-    this.voteDuration = options.voteDurationSec * 1000;
-    this.requiredPercentage = options.requiredPercentage;
-    this.channelID = options.discordChannelID;
-    this.showVoteStatus = options.enableVoteStatusCommand;
     this.activeVote = null;
+    this.voteTimeout = null;
+    this.onChatMessage = this.onChatMessage.bind(this);
   }
 
-  async onPlayerChat(message) {
-    const msg = message.message.trim().toLowerCase();
+  async mount() {
+    this.server.on('CHAT_MESSAGE', this.onChatMessage);
+    console.log('[VoteKickPlugin] Mounted and listening for chat.');
+  }
 
-    if (msg.startsWith('!votekick')) {
-      const parts = message.message.split(' ').filter(Boolean);
-      if (parts.length < 2) {
-        this.server.rcon.warn(message.steamID, 'Usage: !votekick <player name or steamID>');
+  async unmount() {
+    this.server.removeEventListener('CHAT_MESSAGE', this.onChatMessage);
+    if (this.voteTimeout) clearTimeout(this.voteTimeout);
+  }
+
+  async onChatMessage(info) {
+    if (this.options.ignoreChats.includes(info.chat)) return;
+
+    const message = info.message.trim().toLowerCase();
+    const players = Array.from(this.server.players.values());
+    const initiator = info.player;
+
+    // !vote — check status
+    if (message === '!vote') {
+      if (!this.activeVote) {
+        this.server.rcon.warn(initiator.steamID, 'No active vote at this time. Type !kick with player name to start a vote.');
         return;
       }
 
-      const targetQuery = parts.slice(1).join(' ').toLowerCase();
-      const players = await this.server.getPlayers();
-      const target = players.find(p =>
-        p.steamID === targetQuery || p.name.toLowerCase().includes(targetQuery)
+      const yesVotes = this.activeVote.votes.size;
+      const total = players.length;
+      const percent = (yesVotes / total) * 100;
+      const timeLeft = Math.max(0, this.options.voteDurationSec - Math.floor((Date.now() - this.activeVote.startTime) / 1000));
+
+      this.server.rcon.warn(
+        initiator.steamID,
+        `Vote in progress to kick ${this.activeVote.target.name}: ${yesVotes} / ${total} votes (${percent.toFixed(1)}%) — ${timeLeft}s remaining`
       );
+      return;
+    }
 
-      if (!target) {
-        this.server.rcon.warn(message.steamID, `Player not found: ${targetQuery}`);
+    // Only handle !kick
+    if (!message.startsWith('!kick')) return;
+    const args = message.split(' ').slice(1);
+    const query = args.join(' ').toLowerCase();
+
+    if (this.activeVote) {
+      if (this.activeVote.votes.has(initiator.steamID)) {
+        this.server.rcon.warn(initiator.steamID, 'You have already voted.');
         return;
       }
 
-      const voter = message.steamID;
+      this.activeVote.votes.add(initiator.steamID);
+      this.activeVote.voters.push(initiator.name);
 
-      if (!this.activeVote) {
-        this.activeVote = {
-          target,
-          votes: new Set([voter]),
-          startTime: Date.now()
-        };
+      const yesVotes = this.activeVote.votes.size;
+      const total = players.length;
+      const percent = (yesVotes / total) * 100;
 
-        this.server.broadcast(`🗳️ VoteKick started on ${target.name}. Type !votekick ${target.name} to vote YES.`);
-        this.sendDiscordMessage(`🗳️ **VoteKick started** on \`${target.name}\` by <${voter}>. Type \`!votekick ${target.name}\` in-game to vote YES.`);
+      await this.server.rcon.broadcast(`${yesVotes} voted YES to kick ${this.activeVote.target.name} (${percent.toFixed(1)}%)`);
 
-        this.voteTimeout = setTimeout(() => {
-          this.server.broadcast(`⏱️ VoteKick on ${target.name} expired.`);
-          this.sendDiscordMessage(`❌ **VoteKick failed**: Not enough votes to kick \`${target.name}\`.`);
-          this.activeVote = null;
-        }, this.voteDuration);
-      } else {
-        if (this.activeVote.target.steamID !== target.steamID) {
-          this.server.rcon.warn(message.steamID, `A vote is already in progress for ${this.activeVote.target.name}`);
-          return;
-        }
+      if (percent >= this.options.requiredPercentage) {
+        clearTimeout(this.voteTimeout);
+        await this.server.rcon.kick(this.activeVote.target.eosID, 'Vote passed');
+        await this.server.rcon.broadcast(`Vote passed. ${this.activeVote.target.name} has been kicked.`);
 
-        this.activeVote.votes.add(voter);
+        await this.sendDiscordMessage({
+          embed: {
+            title: '✅ Vote Kick Passed',
+            color: 65280,
+            fields: [
+              { name: 'Player Kicked', value: this.activeVote.target.name },
+              { name: 'Votes', value: `${yesVotes} / ${total} (${percent.toFixed(1)}%)` },
+              { name: 'Voters', value: this.activeVote.voters.join(', ') },
+              { name: 'Initiated By', value: this.activeVote.initiator }
+            ],
+            timestamp: new Date().toISOString()
+          }
+        });
 
-        const totalPlayers = players.length;
-        const voteCount = this.activeVote.votes.size;
-        const percent = (voteCount / totalPlayers) * 100;
-
-        this.server.broadcast(`${voteCount} voted YES to kick ${target.name} (${percent.toFixed(1)}%)`);
-
-        if (percent >= this.requiredPercentage) {
-          clearTimeout(this.voteTimeout);
-          this.server.broadcast(`✅ Vote passed. Kicking ${target.name}`);
-          await this.server.rcon.execute(`AdminKick ${target.steamID}`);
-          this.sendDiscordMessage(`✅ **VoteKick passed**: \`${target.name}\` was kicked from the server.`);
-          this.activeVote = null;
-        }
-      }
-    }
-
-    if (msg === '!votes' && this.showVoteStatus) {
-      if (!this.activeVote) {
-        this.server.rcon.warn(message.steamID, 'No vote currently active.');
-        return;
+        this.activeVote = null;
+        this.voteTimeout = null;
       }
 
-      const now = Date.now();
-      const timeLeft = Math.max(0, Math.floor((this.activeVote.startTime + this.voteDuration - now) / 1000));
-      const voteCount = this.activeVote.votes.size;
-      const totalPlayers = (await this.server.getPlayers()).length;
-      const percent = ((voteCount / totalPlayers) * 100).toFixed(1);
-
-      const statusMsg = `🗳️ Vote to kick ${this.activeVote.target.name}: ${voteCount} YES votes (${percent}%) — ${timeLeft}s left`;
-      this.server.rcon.warn(message.steamID, statusMsg);
+      return;
     }
+
+    // Start vote
+    if (!query) {
+      this.server.rcon.warn(initiator.steamID, 'Usage: !kick <player name or SteamID>');
+      return;
+    }
+
+    const target = players.find(p =>
+      p.steamID === query || p.name.toLowerCase().includes(query)
+    );
+
+    if (!target) {
+      this.server.rcon.warn(initiator.steamID, `Player not found: ${query}`);
+      return;
+    }
+
+    this.activeVote = {
+      target,
+      votes: new Set([initiator.steamID]),
+      voters: [initiator.name],
+      startTime: Date.now(),
+      initiator: initiator.name
+    };
+
+    await this.server.rcon.broadcast(`Vote Kick started on ${target.name}. Type !kick to vote YES.`);
+
+    await this.sendDiscordMessage({
+      embed: {
+        title: '🗳️ Vote Kick Started',
+        color: 16776960,
+        fields: [
+          { name: 'Target', value: target.name, inline: true },
+          { name: 'Started by', value: initiator.name, inline: true }
+        ],
+        timestamp: new Date().toISOString()
+      }
+    });
+
+    this.voteTimeout = setTimeout(() => this.expireVote(), this.options.voteDurationSec * 1000);
   }
 
-  sendDiscordMessage(content) {
-    if (this.channelID && this.discord) {
-      this.discord.send(this.channelID, content);
-    }
+  async expireVote() {
+    const { target, votes, voters, initiator } = this.activeVote;
+
+    await this.server.rcon.broadcast(`Vote to Kick on ${target.name} expired.`);
+
+    await this.sendDiscordMessage({
+      embed: {
+        title: '❌ Vote Kick Failed',
+        color: 16711680,
+        fields: [
+          { name: 'Player', value: target.name },
+          { name: 'Votes', value: `${votes.size}` },
+          { name: 'Voters', value: voters.join(', ') || 'None' },
+          { name: 'Initiated By', value: initiator }
+        ],
+        timestamp: new Date().toISOString()
+      }
+    });
+
+    this.activeVote = null;
+    this.voteTimeout = null;
   }
 }
-
-export default VoteKickPlugin;
