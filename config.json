@@ -1,0 +1,9 @@
+{
+  "plugin": "VoteKickPlugin",
+  "enabled": true,
+  "voteDurationSec": 120,
+  "requiredPercentage": 60,
+  "discordChannelID": "112233445566778899",
+  "enableVoteStatusCommand": true,
+  "websocketPort": ""
+}
