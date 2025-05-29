@@ -123,7 +123,7 @@ export default class VoteKickPlugin extends DiscordBasePlugin {
               { name: 'EOSID', value: this.activeVote.target.eosID },
               { name: 'Votes', value: `${yesVotes} / ${total} (${percent.toFixed(1)}%)` },
               { name: 'Voters', value: this.activeVote.voters.join(', ') },
-              { name: 'Initiated By', value: `${this.activeVote.initiator} — [${initiator.steamID}](https://steamcommunity.com/profiles/${initiator.steamID})\nEOSID: ${initiator.eosID}` }
+              { name: 'Initiated By', value: `${this.activeVote.initiator.name} — [${this.activeVote.initiator.steamID}](https://steamcommunity.com/profiles/${this.activeVote.initiator.steamID})\nEOSID: ${this.activeVote.initiator.eosID}` }
             ],
             timestamp: new Date().toISOString()
           }
@@ -155,7 +155,7 @@ export default class VoteKickPlugin extends DiscordBasePlugin {
       votes: new Set([initiator.steamID]),
       voters: [initiator.name],
       startTime: Date.now(),
-      initiator: initiator.name
+      initiator
     };
 
     await this.server.rcon.broadcast(`Vote Kick started on ${target.name}. Type !kick to vote YES.`);
@@ -202,7 +202,7 @@ export default class VoteKickPlugin extends DiscordBasePlugin {
           { name: 'EOSID', value: target.eosID },
           { name: 'Votes', value: `${votes.size}` },
           { name: 'Voters', value: voters.join(', ') || 'None' },
-          { name: 'Initiated By', value: `${initiator}` }
+          { name: 'Initiated By', value: `${initiator.name} — [${initiator.steamID}](https://steamcommunity.com/profiles/${initiator.steamID})\nEOSID: ${initiator.eosID}` }
         ],
         timestamp: new Date().toISOString()
       }
