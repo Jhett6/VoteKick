@@ -67,9 +67,10 @@ export default class VoteKickPlugin extends DiscordBasePlugin {
         return;
       }
 
-      const yesVotes = this.activeVote.votes.size;
-      const total = players.length;
-      const percent = (yesVotes / total) * 100;
+	  const yesVotes = this.activeVote.votes.size;
+	  const total = players.filter(p => p.steamID).length || 1;
+	  const percent = (yesVotes / total) * 100;
+
       const timeLeft = Math.max(0, this.options.voteDurationSec - Math.floor((Date.now() - this.activeVote.startTime) / 1000));
 
       this.server.rcon.warn(
@@ -93,9 +94,10 @@ export default class VoteKickPlugin extends DiscordBasePlugin {
       this.activeVote.votes.add(initiator.steamID);
       this.activeVote.voters.push(initiator.name);
 
-      const yesVotes = this.activeVote.votes.size;
-      const total = players.length;
-      const percent = (yesVotes / total) * 100;
+	  const yesVotes = this.activeVote.votes.size;
+	  const total = players.filter(p => p.steamID).length || 1;
+	  const percent = (yesVotes / total) * 100;
+
 
       await this.server.rcon.broadcast(`${yesVotes} voted YES to kick ${this.activeVote.target.name} (${percent.toFixed(1)}%)`);
 
