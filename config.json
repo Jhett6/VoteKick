@@ -8,5 +8,8 @@
   "ignoreChats": [
     "ChatSquad"
   ],
+    "pingGroups": [
+    "11223344556677889900"
+  ],
   "websocketPort": ""
 }
